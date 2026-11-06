@@ -7,7 +7,9 @@ const THEME = {
 // RULES: Speeds are in Canvas pixels per second.
 const RULES = {
   playerSpeed: 270, hazardSpeed: 115, speedPerLevel: 22,
-  maxHazardSpeed: 235, pointsPerLevel: 5, maxHazards: 8
+  maxHazardSpeed: 235, pointsPerLevel: 5, maxHazards: 8,
+  mysterySpeed: 145, mysteryRevealSeconds: 3, mysteryTurnSeconds: 0.7,
+  mysterySpawnSeconds: 8
 };
 
 const canvas = document.querySelector("#arena");
@@ -27,9 +29,10 @@ const touches = new Map();
 const storageKey = "pixel-playground-best";
 
 let state = "ready";
-let player, collectible, hazards, score, level;
+let player, collectible, mystery, hazards, score, level;
 let best = 0;
 let lastTime;
+let mysterySpawnIn;
 
 try {
   best = Number(localStorage.getItem(storageKey)) || 0;
@@ -41,11 +44,14 @@ function resetRound() {
   player = { x: width / 2, y: height / 2, size: 26 };
   hazards = [];
   collectible = undefined;
+  mystery = undefined;
+  mysterySpawnIn = RULES.mysterySpawnSeconds;
   score = 0;
   level = 1;
   addHazard();
   addHazard();
   placeCollectible();
+  spawnMystery();
   updateHud();
 }
 
@@ -94,7 +100,7 @@ function openSpot(size, blockers, gap) {
 }
 
 function addHazard() {
-  const blockers = collectible ? [player, collectible, ...hazards] : [player, ...hazards];
+  const blockers = [player, ...hazards, collectible, mystery].filter(Boolean);
   const spot = openSpot(28, blockers, 50) ?? openSpot(28, blockers, 0);
   if (!spot) return;
   const angle = Math.random() * Math.PI * 2;
@@ -102,8 +108,23 @@ function addHazard() {
 }
 
 function placeCollectible() {
-  const blockers = [player, ...hazards];
+  const blockers = [player, ...hazards, mystery].filter(Boolean);
   collectible = openSpot(22, blockers, 20) ?? openSpot(22, blockers);
+}
+
+function spawnMystery() {
+  const blockers = [player, ...hazards, collectible].filter(Boolean);
+  const spot = openSpot(26, blockers, 44) ?? openSpot(26, blockers, 0);
+  if (!spot) return;
+  const angle = Math.random() * Math.PI * 2;
+  mystery = {
+    ...spot,
+    dx: Math.cos(angle),
+    dy: Math.sin(angle),
+    outcome: Math.random() < 0.5 ? "spark" : "drone",
+    revealIn: RULES.mysteryRevealSeconds,
+    turnIn: RULES.mysteryTurnSeconds
+  };
 }
 
 function clamp(value, min, max) {
@@ -134,29 +155,70 @@ function moveHazards(dt) {
   }
 }
 
+function moveMystery(dt) {
+  if (!mystery) return;
+  mystery.revealIn = Math.max(0, mystery.revealIn - dt);
+  mystery.turnIn -= dt;
+  if (mystery.turnIn <= 0) {
+    const angle = Math.random() * Math.PI * 2;
+    mystery.dx = Math.cos(angle);
+    mystery.dy = Math.sin(angle);
+    mystery.turnIn = RULES.mysteryTurnSeconds * (0.7 + Math.random() * 0.6);
+  }
+  const edge = mystery.size / 2;
+  mystery.x += mystery.dx * RULES.mysterySpeed * dt;
+  mystery.y += mystery.dy * RULES.mysterySpeed * dt;
+  if (mystery.x < edge || mystery.x > width - edge) mystery.dx *= -1;
+  if (mystery.y < edge || mystery.y > height - edge) mystery.dy *= -1;
+  mystery.x = clamp(mystery.x, edge, width - edge);
+  mystery.y = clamp(mystery.y, edge, height - edge);
+}
+
+function updateMysterySpawner(dt) {
+  mysterySpawnIn -= dt;
+  if (mysterySpawnIn > 0) return;
+  spawnMystery();
+  mysterySpawnIn = RULES.mysterySpawnSeconds;
+}
+
+function collectSpark() {
+  score += 1;
+  if (score > best) {
+    best = score;
+    try {
+      localStorage.setItem(storageKey, best);
+    } catch {
+      // Keep the in-memory score.
+    }
+  }
+  if (score % RULES.pointsPerLevel === 0) {
+    level += 1;
+    if (hazards.length < RULES.maxHazards) addHazard();
+  }
+  updateHud();
+}
+
 function update(dt) {
   movePlayer(dt);
   moveHazards(dt);
+  updateMysterySpawner(dt);
+  moveMystery(dt);
   if (hazards.some(hazard => overlaps(player, hazard))) {
     endRound();
     return;
   }
+  if (mystery && overlaps(player, mystery)) {
+    const outcome = mystery.outcome;
+    mystery = undefined;
+    if (outcome === "drone") {
+      endRound();
+      return;
+    }
+    collectSpark();
+  }
   if (collectible && overlaps(player, collectible)) {
-    score += 1;
-    if (score > best) {
-      best = score;
-      try {
-        localStorage.setItem(storageKey, best);
-      } catch {
-        // Keep the in-memory score.
-      }
-    }
-    if (score % RULES.pointsPerLevel === 0) {
-      level += 1;
-      if (hazards.length < RULES.maxHazards) addHazard();
-    }
+    collectSpark();
     placeCollectible();
-    updateHud();
   }
 }
 
@@ -179,6 +241,18 @@ function draw() {
     ctx.rotate(Math.PI / 4);
     drawSquare({ x: 0, y: 0, size: collectible.size / Math.SQRT2 }, THEME.collectible);
     ctx.restore();
+  }
+  if (mystery) {
+    const revealed = mystery.revealIn === 0;
+    const color = revealed
+      ? (mystery.outcome === "spark" ? THEME.collectible : THEME.hazard)
+      : "#ad8cff";
+    drawSquare(mystery, color);
+    ctx.fillStyle = THEME.background;
+    ctx.font = "bold 22px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(revealed && mystery.outcome === "drone" ? "×" : revealed ? "◆" : "?", mystery.x, mystery.y + 1);
   }
   for (const hazard of hazards) {
     drawSquare(hazard, THEME.hazard);
